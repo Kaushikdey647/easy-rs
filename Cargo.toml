@@ -5,8 +5,8 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 
 [dependencies]
-apca = { version = "0.30", path = "../apca" }
-orderbook-rs = { version = "0.6.1", path = "../OrderBook-rs" }
+apca = "0.30.0"
+orderbook-rs = "0.6.1"
 pricelevel = "0.7"
 chrono = "0.4"
 crossbeam-queue = { version = "0.3", default-features = false }
