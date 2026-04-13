@@ -41,12 +41,7 @@ async fn run() -> Result<(), AlpacaError> {
     // Load `.env` from the current working directory if present. Does not override existing vars.
     let _ = dotenvy::dotenv();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    easy_rs::init_tracing();
 
     let symbols = symbols_from_env();
     if symbols.is_empty() {
@@ -86,6 +81,7 @@ async fn run() -> Result<(), AlpacaError> {
         ring,
         Arc::clone(&dropped),
         Arc::clone(&shutdown),
+        None,
     )
     .await?;
 

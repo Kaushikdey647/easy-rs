@@ -7,6 +7,7 @@ use orderbook_rs::{DefaultOrderBook, OrderBookError};
 use pricelevel::{Id, OrderUpdate, Price, Quantity, Side, TimeInForce};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tracing::instrument;
 
 struct SymbolSynth {
     bid_id: Id,
@@ -90,6 +91,7 @@ pub fn run_consumer(queue: QuoteRing, books: Vec<Arc<DefaultOrderBook>>, shutdow
     }
 }
 
+#[instrument(level = "trace", skip_all)]
 fn drain_batch(
     queue: &Arc<ArrayQueue<QuoteEvent>>,
     books: &[Arc<DefaultOrderBook>],
