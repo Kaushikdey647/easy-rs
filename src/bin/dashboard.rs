@@ -3,14 +3,17 @@
 //! Run: `cargo run --features dashboard --bin easy-rs-dashboard`
 //!
 //! Env: same as `easy-rs` (`APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`, `EASY_RS_SYMBOLS`, …).
+//! Optional: `EASY_RS_FEED_CAP` — capacity of the lock-free ingest queue (default `65536`).
+//! When the queue is full, **new events are dropped** (drop-newest) and a counter is shown in the UI.
 //! Optional: `EASY_RS_TRACING_SPANS=1`, `TRACY=1` with `--features tracy`.
 
-use easy_rs::cold_path::{run_alpaca_quotes, AlpacaFeedConfig, AlpacaFeedSource};
-use easy_rs::hot_path::ring::new_quote_ring;
-use easy_rs::hot_path::run_consumer;
-use easy_rs::viz::app::DashboardApp;
-use easy_rs::viz::VizStore;
-use easy_rs::{BookRegistry, SymbolRegistry};
+use crossbeam_queue::ArrayQueue;
+use easy_rs::cold_path::time_anchor;
+use easy_rs::cold_path::FeedMsg;
+use easy_rs::cold_path::{run_alpaca_quotes, AlpacaFeedConfig, AlpacaFeedSource, AlpacaQuoteSink};
+use easy_rs::viz::app::{dashboard_style, DashboardApp};
+use easy_rs::viz::DashboardPipeline;
+use easy_rs::SymbolRegistry;
 use eframe::egui;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -35,16 +38,18 @@ fn symbols_from_env() -> Vec<String> {
         .collect()
 }
 
-fn ring_capacity() -> usize {
-    std::env::var("EASY_RS_RING_CAP")
+fn feed_queue_cap() -> usize {
+    std::env::var("EASY_RS_FEED_CAP")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(4096)
+        .filter(|&c| c > 0)
+        .unwrap_or(65_536)
 }
 
 fn main() -> eframe::Result<()> {
     let _ = dotenvy::dotenv();
     easy_rs::init_tracing();
+    time_anchor::ensure_started();
 
     let symbols = symbols_from_env();
     if symbols.is_empty() {
@@ -54,24 +59,14 @@ fn main() -> eframe::Result<()> {
 
     let registry = SymbolRegistry::new(symbols);
     let symbol_labels: Vec<String> = registry.symbols_sorted().to_vec();
-    let book_registry = BookRegistry::from_sorted_symbols(registry.symbols_sorted());
-    let consumer_books: Vec<_> = book_registry.books().to_vec();
 
-    let ring = new_quote_ring(ring_capacity());
     let shutdown = Arc::new(AtomicBool::new(false));
-    let dropped = Arc::new(AtomicU64::new(0));
-    let viz = VizStore::new(registry.len());
-
-    let hot_ring = Arc::clone(&ring);
-    let hot_shutdown = Arc::clone(&shutdown);
-    let hot_handle = std::thread::spawn(move || {
-        run_consumer(hot_ring, consumer_books, hot_shutdown);
-    });
+    let feed_dropped = Arc::new(AtomicU64::new(0));
+    let queue = Arc::new(ArrayQueue::<FeedMsg>::new(feed_queue_cap()));
+    let pipeline = DashboardPipeline::new(registry.len(), Arc::clone(&feed_dropped));
+    pipeline.spawn_aggregator(Arc::clone(&queue), Arc::clone(&shutdown));
 
     let feed_shutdown = Arc::clone(&shutdown);
-    let feed_ring = Arc::clone(&ring);
-    let feed_dropped = Arc::clone(&dropped);
-    let feed_viz = Arc::clone(&viz);
     let feed_symbols = registry.symbols_sorted().to_vec();
     let feed_registry = registry;
 
@@ -89,16 +84,9 @@ fn main() -> eframe::Result<()> {
                 symbols: feed_symbols,
             };
 
-            if let Err(e) = run_alpaca_quotes(
-                cfg,
-                feed_registry,
-                feed_ring,
-                feed_dropped,
-                feed_shutdown,
-                Some(feed_viz),
-            )
-            .await
-            {
+            let sink = AlpacaQuoteSink::dashboard(queue, Arc::clone(&feed_dropped));
+
+            if let Err(e) = run_alpaca_quotes(cfg, feed_registry, sink, feed_shutdown).await {
                 tracing::error!(?e, "Alpaca feed exited with error");
             }
         });
@@ -106,20 +94,22 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 900.0])
-            .with_title("easy-rs market dashboard"),
+            .with_inner_size([1180.0, 920.0])
+            .with_title("easy-rs · market dashboard"),
         ..Default::default()
     };
 
-    let app = DashboardApp::new(symbol_labels, viz, Arc::clone(&shutdown));
+    let app = DashboardApp::new(symbol_labels, pipeline, Arc::clone(&shutdown));
     let _ = eframe::run_native(
         "easy-rs dashboard",
         options,
-        Box::new(|_cc| Ok(Box::new(app))),
+        Box::new(|cc| {
+            dashboard_style(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
     );
 
     shutdown.store(true, Ordering::SeqCst);
-    let _ = hot_handle.join();
 
     Ok(())
 }

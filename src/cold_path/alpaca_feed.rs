@@ -1,18 +1,17 @@
-//! Alpaca v2 stock websocket (quotes + trades) → [`crate::hot_path::QuoteRing`] + optional [`crate::viz::VizStore`].
+//! Alpaca v2 stock websocket (quotes + trades) → [`AlpacaQuoteSink`] (viz / last NBBO / optional ring).
 
+use crate::cold_path::sink::AlpacaQuoteSink;
 use crate::cold_path::symbols::SymbolRegistry;
 use crate::cold_path::ticks::{num_to_tick_u64, num_to_whole_shares};
 use crate::hot_path::quote_event::QuoteEvent;
-use crate::hot_path::ring::{try_push_drop_newest, QuoteRing, RingPushOutcome};
-use crate::viz::VizStore;
 use apca::data::v2::stream::{drive, Data, IEX, MarketData, RealtimeData, SIP, Source};
 use apca::{ApiInfo, Client, Error};
 use chrono::{DateTime, Utc};
-use crossbeam_queue::ArrayQueue;
 use futures::FutureExt;
 use futures::StreamExt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::instrument;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,28 +29,25 @@ pub struct AlpacaFeedConfig {
 pub async fn run_alpaca_quotes(
     cfg: AlpacaFeedConfig,
     registry: SymbolRegistry,
-    ring: QuoteRing,
-    dropped: Arc<AtomicU64>,
+    sink: AlpacaQuoteSink,
     shutdown: Arc<AtomicBool>,
-    viz: Option<Arc<VizStore>>,
 ) -> Result<(), Error> {
     match cfg.source {
-        AlpacaFeedSource::Iex => run_inner::<IEX>(cfg, registry, ring, dropped, shutdown, viz).await,
-        AlpacaFeedSource::Sip => run_inner::<SIP>(cfg, registry, ring, dropped, shutdown, viz).await,
+        AlpacaFeedSource::Iex => run_inner::<IEX>(cfg, registry, sink, shutdown).await,
+        AlpacaFeedSource::Sip => run_inner::<SIP>(cfg, registry, sink, shutdown).await,
     }
 }
 
 async fn run_inner<S>(
     cfg: AlpacaFeedConfig,
     registry: SymbolRegistry,
-    ring: QuoteRing,
-    dropped: Arc<AtomicU64>,
+    sink: AlpacaQuoteSink,
     shutdown: Arc<AtomicBool>,
-    viz: Option<Arc<VizStore>>,
 ) -> Result<(), Error>
 where
     S: Source,
 {
+    crate::cold_path::time_anchor::ensure_started();
     let api_info = ApiInfo::from_env()?;
     let client = Client::new(api_info);
     let (mut stream, mut subscription) = client.subscribe::<RealtimeData<S>>().await?;
@@ -74,8 +70,8 @@ where
     match subscribe_result {
         Ok(Ok(())) => {}
         Ok(Err(alpaca_err)) => return Err(alpaca_err),
-        Err(sink_err) => {
-            return Err(Error::Str(format!("subscription sink: {sink_err:?}").into()));
+        Err(sub_err) => {
+            return Err(Error::Str(format!("subscription sink: {sub_err:?}").into()));
         }
     }
 
@@ -91,7 +87,7 @@ where
 
         match frame {
             Ok(Ok(payload)) => {
-                if let Err(e) = handle_payload(&registry, ring.as_ref(), &dropped, viz.as_ref(), payload) {
+                if let Err(e) = handle_payload(&registry, &sink, payload) {
                     tracing::warn!(?e, "payload handling error");
                 }
             }
@@ -114,17 +110,11 @@ fn wall_ns() -> u64 {
         .unwrap_or(0)
 }
 
-fn handle_payload(
-    registry: &SymbolRegistry,
-    ring: &ArrayQueue<QuoteEvent>,
-    dropped: &AtomicU64,
-    viz: Option<&Arc<VizStore>>,
-    payload: Data,
-) -> Result<(), &'static str> {
+fn handle_payload(registry: &SymbolRegistry, sink: &AlpacaQuoteSink, payload: Data) -> Result<(), &'static str> {
     match payload {
-        Data::Quote(q) => handle_quote(registry, ring, dropped, viz, q),
+        Data::Quote(q) => handle_quote(registry, sink, q),
         Data::Trade(t) => {
-            handle_trade(registry, viz, t)?;
+            handle_trade(registry, sink, t)?;
             Ok(())
         }
         Data::Bar(_) => Ok(()),
@@ -136,12 +126,11 @@ fn handle_payload(
 #[instrument(skip_all, fields(symbol = %q.symbol))]
 fn handle_quote(
     registry: &SymbolRegistry,
-    ring: &ArrayQueue<QuoteEvent>,
-    dropped: &AtomicU64,
-    viz: Option<&Arc<VizStore>>,
+    sink: &AlpacaQuoteSink,
     q: apca::data::v2::stream::Quote,
 ) -> Result<(), &'static str> {
-    let local_rx_ns = wall_ns();
+    let ingest_instant = Instant::now();
+    let ingest_mono_ns = crate::cold_path::time_anchor::mono_ns_since_start(ingest_instant);
     let Some(symbol_id) = registry.id(q.symbol.as_str()) else {
         return Ok(());
     };
@@ -154,6 +143,7 @@ fn handle_quote(
     let bid_sz = num_to_whole_shares(&q.bid_size);
     let ask_sz = num_to_whole_shares(&q.ask_size);
     let ts_ns = quote_ts_ns(&q.timestamp);
+    let local_rx_ns = wall_ns();
 
     let ev = QuoteEvent {
         symbol_id,
@@ -163,24 +153,15 @@ fn handle_quote(
         ask_sz,
         ts_ns,
         local_rx_ns,
+        ingest_mono_ns,
     };
 
-    if try_push_drop_newest(ring, ev) == RingPushOutcome::DroppedNewest {
-        dropped.fetch_add(1, Ordering::Relaxed);
-    }
-
-    if let Some(v) = viz {
-        v.on_quote(symbol_id, bid_px, ask_px, bid_sz, ask_sz, ts_ns, local_rx_ns);
-    }
+    sink.on_quote(ev);
     Ok(())
 }
 
 #[instrument(skip_all, fields(symbol = %t.symbol))]
-fn handle_trade(
-    registry: &SymbolRegistry,
-    viz: Option<&Arc<VizStore>>,
-    t: apca::data::v2::stream::Trade,
-) -> Result<(), &'static str> {
+fn handle_trade(registry: &SymbolRegistry, sink: &AlpacaQuoteSink, t: apca::data::v2::stream::Trade) -> Result<(), &'static str> {
     let Some(symbol_id) = registry.id(t.symbol.as_str()) else {
         return Ok(());
     };
@@ -190,9 +171,7 @@ fn handle_trade(
     let sz = num_to_whole_shares(&t.trade_size);
     let ts_ns = quote_ts_ns(&t.timestamp);
 
-    if let Some(v) = viz {
-        v.on_trade(symbol_id, px, sz, ts_ns);
-    }
+    sink.on_trade_msg(symbol_id, px, sz, ts_ns);
     Ok(())
 }
 

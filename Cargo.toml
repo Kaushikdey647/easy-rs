@@ -6,13 +6,12 @@ license = "GPL-3.0-or-later"
 
 [features]
 default = []
-dashboard = ["dep:eframe", "dep:egui", "dep:egui_plot"]
+dashboard = ["dep:arc-swap", "dep:eframe", "dep:egui", "dep:egui_plot"]
 tracy = ["dep:tracing-tracy"]
 
 [dependencies]
+arc-swap = { version = "1.7", optional = true }
 apca = "0.30.0"
-orderbook-rs = "0.6.1"
-pricelevel = "0.7"
 chrono = "0.4"
 crossbeam-queue = { version = "0.3", default-features = false }
 dotenvy = "0.15"

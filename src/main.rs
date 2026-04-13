@@ -1,11 +1,9 @@
-//! Alpaca quote stream (ColdPath) → bounded ring → single consumer (HotPath) → `orderbook-rs`.
+//! Alpaca quote/trade stream (cold path) with optional sinks—no local order book.
 
 use apca::Error as AlpacaError;
-use easy_rs::cold_path::{run_alpaca_quotes, AlpacaFeedConfig, AlpacaFeedSource};
-use easy_rs::hot_path::ring::new_quote_ring;
-use easy_rs::hot_path::run_consumer;
-use easy_rs::{BookRegistry, SymbolRegistry};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use easy_rs::cold_path::{run_alpaca_quotes, AlpacaFeedConfig, AlpacaFeedSource, AlpacaQuoteSink};
+use easy_rs::SymbolRegistry;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::info;
 
@@ -29,19 +27,12 @@ fn symbols_from_env() -> Vec<String> {
         .collect()
 }
 
-fn ring_capacity() -> usize {
-    std::env::var("EASY_RS_RING_CAP")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(4096)
-}
-
 /// Core logic uses `apca::Error` end-to-end so `?` works without boxing to `dyn Error`.
 async fn run() -> Result<(), AlpacaError> {
-    // Load `.env` from the current working directory if present. Does not override existing vars.
     let _ = dotenvy::dotenv();
 
     easy_rs::init_tracing();
+    easy_rs::cold_path::time_anchor::ensure_started();
 
     let symbols = symbols_from_env();
     if symbols.is_empty() {
@@ -51,18 +42,9 @@ async fn run() -> Result<(), AlpacaError> {
     }
 
     let registry = SymbolRegistry::new(symbols);
-    let book_registry = BookRegistry::from_sorted_symbols(registry.symbols_sorted());
-    let consumer_books: Vec<_> = book_registry.books().to_vec();
+    let (sink, last_nbbo) = AlpacaQuoteSink::headless_last_nbbo(registry.len());
 
-    let ring = new_quote_ring(ring_capacity());
     let shutdown = Arc::new(AtomicBool::new(false));
-    let dropped = Arc::new(AtomicU64::new(0));
-
-    let hot_ring = Arc::clone(&ring);
-    let hot_shutdown = Arc::clone(&shutdown);
-    let hot_handle = std::thread::spawn(move || {
-        run_consumer(hot_ring, consumer_books, hot_shutdown);
-    });
 
     let shutdown_signal = Arc::clone(&shutdown);
     tokio::spawn(async move {
@@ -75,31 +57,24 @@ async fn run() -> Result<(), AlpacaError> {
         symbols: registry.symbols_sorted().to_vec(),
     };
 
-    run_alpaca_quotes(
-        cfg,
-        registry,
-        ring,
-        Arc::clone(&dropped),
-        Arc::clone(&shutdown),
-        None,
-    )
-    .await?;
+    run_alpaca_quotes(cfg, registry, sink, Arc::clone(&shutdown)).await?;
 
     shutdown.store(true, Ordering::SeqCst);
-    hot_handle.join().expect("hot thread join");
 
-    info!(
-        ring_dropped_events = dropped.load(Ordering::Relaxed),
-        "feed stopped; printing last NBBO snapshot (best bid/ask ticks)"
-    );
+    info!("feed stopped; last NBBO snapshot (integer ticks, 1e-8 dollars per tick unit)");
 
-    for (i, book) in book_registry.books().iter().enumerate() {
-        info!(
-            symbol_id = i,
-            best_bid = ?book.best_bid(),
-            best_ask = ?book.best_ask(),
-            "book top"
-        );
+    let snap = last_nbbo.lock();
+    for (i, q) in snap.iter().enumerate() {
+        if let Some(ev) = q {
+            info!(
+                symbol_id = i,
+                bid_px_ticks = ev.bid_px_ticks,
+                ask_px_ticks = ev.ask_px_ticks,
+                bid_sz = ev.bid_sz,
+                ask_sz = ev.ask_sz,
+                "nbbo"
+            );
+        }
     }
 
     Ok(())

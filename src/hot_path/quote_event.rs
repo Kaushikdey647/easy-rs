@@ -19,4 +19,6 @@ pub struct QuoteEvent {
     /// Used with [`Self::ts_ns`] for `local - exchange` latency. Host clock skew vs the
     /// exchange time base can make small negative differences; use [`saturating_sub`] when differencing.
     pub local_rx_ns: u64,
+    /// Nanoseconds since process start ([`crate::cold_path::time_anchor`]) at ingest — for pipeline timing.
+    pub ingest_mono_ns: u64,
 }

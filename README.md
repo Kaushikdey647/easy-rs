@@ -1,26 +1,26 @@
 # easy-rs
 
-Rust service that streams **stock quotes and trades** from [Alpaca](https://alpaca.markets/) over WebSocket, normalizes them on a **cold path** (Tokio + I/O), hands quotes to a **hot path** (single consumer thread + lock-free queue), and maintains a **NBBO mirror** in [`orderbook-rs`](https://crates.io/crates/orderbook-rs). The design targets predictable local processing latency: the hot path avoids per-tick logging and uses a bounded queue so work stays bounded when the producer outruns the consumer.
+Rust service that streams **stock quotes and trades** from [Alpaca](https://alpaca.markets/) over WebSocket and normalizes them on a **cold path** (Tokio + JSON decode + tick scaling). **NBBO comes straight from the feed**—there is no separate local order book, since Alpaca quotes are already top-of-book.
 
-An optional **`dashboard`** feature adds a native **egui** app with live NBBO spread, liquidity heatmap, trade-flow imbalance (Lee–Ready), and quote latency plots.
+An optional **`dashboard`** feature adds a native **egui** app: bid–ask spread, NBBO liquidity heatmap, trade imbalance (Lee–Ready), and quote **latency** (local wall clock − exchange timestamp), with a 2×2 layout and light smoothing for readability. The UI reads a pre-aggregated **`DashboardSnapshot`** (downsampled buckets + heatmap) so the Tokio ingest path only parses and **lock-free enqueues**; a dedicated thread owns downsampling and Lee–Ready state.
 
 License: GPL-3.0-or-later (see `Cargo.toml`).
 
 ## What it does
 
 - Subscribes to Alpaca **v2 real-time quotes and trades** for one or more symbols.
-- Maps each quote to a compact [`QuoteEvent`](src/hot_path/quote_event.rs): integer prices at 8 decimal places, whole-share sizes, symbol id, **exchange timestamp** (`ts_ns`), and **local receive time** (`local_rx_ns`) for latency telemetry.
-- Pushes quote events through a **bounded** `crossbeam_queue::ArrayQueue`. If the queue is full, **new events are dropped** (counter tracked; see logs on shutdown).
-- Applies NBBO updates into one [`DefaultOrderBook`](https://docs.rs/orderbook-rs) per symbol using **synthetic** bid/ask limit orders (stable IDs per symbol).
-- **Trades** are not applied to the book; they feed optional **visualization** (cumulative signed volume via Lee–Ready classification against the last NBBO).
-- On **Ctrl+C** (SIGINT), stops cleanly, joins the consumer, logs how many events were dropped, and prints a **best bid / best ask** snapshot per symbol (CLI binary).
+- Maps each quote to a compact [`QuoteEvent`](src/hot_path/quote_event.rs): integer prices at 8 decimal places, whole-share sizes, symbol id, **exchange timestamp** (`ts_ns`), **local receive time** (`local_rx_ns`) for display latency, and **`ingest_mono_ns`** (monotonic nanoseconds since process start) for pipeline timing.
+- Fans out each quote through [`AlpacaQuoteSink`](src/cold_path/sink.rs): optional bounded **ring** (for advanced use), optional **last-NBBO buffer** (CLI shutdown log), and/or a lock-free **`ArrayQueue<FeedMsg>`** for the dashboard (**drop-newest** when full — see `EASY_RS_FEED_CAP` below).
+- **Trades** drive imbalance visualization (Lee–Ready vs last NBBO); they are not written into any local book.
+- **CLI** on **Ctrl+C**: stops the feed and logs the **last quoted NBBO** per symbol from the buffer.
+- **Dashboard**: live plots; closing the window stops the feed.
 
-**Note:** `Cargo.toml` also pulls in Polars, Plotters, and `ta` for potential analytics work. The running CLI stack is Alpaca + ring + order book + tracing; the **dashboard** uses **egui** / **egui_plot** (not Plotters).
+**Note:** `Cargo.toml` also lists Polars, Plotters, and `ta` for optional analytics; the default binaries use Alpaca + tracing + (optional) egui only.
 
 ## Requirements
 
 - **Rust** with **Edition 2024** support (for example Rust **1.85** or newer). Check with `rustc --version`.
-- An Alpaca account with API keys and appropriate **market data** access. The default feed in this project is **IEX**; **SIP** requires Alpaca SIP entitlement (paid tier). See [Alpaca market data](https://docs.alpaca.markets/docs/market-data).
+- An Alpaca account with API keys and appropriate **market data** access. The default feed is **IEX**; **SIP** needs entitlement. See [Alpaca market data](https://docs.alpaca.markets/docs/market-data).
 
 ## Configuration: environment variables
 
@@ -35,19 +35,21 @@ License: GPL-3.0-or-later (see `Cargo.toml`).
 
 If you omit the URL variables, `apca` uses its defaults (use paper vs live keys consistent with your account).
 
-On startup, binaries load a **`.env`** file from the **current working directory** if it exists ([`dotenvy`](https://crates.io/crates/dotenvy)). Variables already set in your shell are **not** overwritten. Copy [`.env.example`](.env.example) to `.env` for a template (`.env` is gitignored).
+On startup, binaries load **`.env`** from the **current working directory** if it exists ([`dotenvy`](https://crates.io/crates/dotenvy)). Variables already set in your shell are **not** overwritten. Copy [`.env.example`](.env.example) to `.env` for a template (`.env` is gitignored).
 
-### Runtime tuning (CLI and dashboard)
+### Runtime tuning
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `EASY_RS_SYMBOLS` | `SPY` | Comma-separated tickers (trimmed, uppercased). At least one symbol required. |
-| `EASY_RS_ALPACA_FEED` | `iex` | `iex` or `sip` — selects Alpaca stream source. |
-| `EASY_RS_RING_CAP` | `4096` | Capacity of the quote ring; when full, newest quotes may be dropped. |
+| `EASY_RS_ALPACA_FEED` | `iex` | `iex` or `sip` — stream source. |
+| `EASY_RS_FEED_CAP` | `65536` | Dashboard only: capacity of the ingest `ArrayQueue`. When full, **new events are dropped** (drop-newest) so backlog age stays bounded; the UI shows a running drop count. |
+
+`EASY_RS_RING_CAP` is only relevant if you integrate a **quote ring** yourself via [`AlpacaQuoteSink::with_ring`](src/cold_path/sink.rs); the stock CLI and dashboard do **not** use a ring by default.
 
 ### Logging and tracing
 
-Uses [`tracing-subscriber`](https://docs.rs/tracing-subscriber) with `EnvFilter`. Set log level like any `tracing` app, for example:
+Uses [`tracing-subscriber`](https://docs.rs/tracing-subscriber) with `EnvFilter`. Example:
 
 ```bash
 export RUST_LOG=info # default if unset
@@ -58,100 +60,79 @@ export RUST_LOG=easy_rs=debug,apca=info
 
 | Variable | Purpose |
 |----------|---------|
-| `EASY_RS_TRACING_SPANS=1` | Emit span **close** events on stderr (pair with `RUST_LOG=trace` for a latency-oriented trace). |
+| `EASY_RS_TRACING_SPANS=1` | Emit span **close** events on stderr (pair with `RUST_LOG=trace`). |
 
-With the **`tracy`** Cargo feature and `TRACY=1`, a **Tracy** layer is registered alongside stderr logging (connect with the Tracy profiler).
+With the **`tracy`** Cargo feature and `TRACY=1`, a **Tracy** layer is registered (use the Tracy profiler).
 
 ## How to run (CLI)
-
-From the repository root:
 
 ```bash
 export APCA_API_KEY_ID="your-key-id"
 export APCA_API_SECRET_KEY="your-secret"
 
-# Optional: symbols and feed
-export EASY_RS_SYMBOLS="SPY,QQQ"
-export EASY_RS_ALPACA_FEED=iex    # or sip if your account has SIP
-
-# Optional: larger ring if you see many dropped events under load
-export EASY_RS_RING_CAP=8192
+export EASY_RS_SYMBOLS="SPY,QQQ"   # optional
+export EASY_RS_ALPACA_FEED=iex     # or sip
 
 cargo run --release
 ```
 
-Stop with **Ctrl+C**. Watch for log lines that include `ring_dropped_events` (pressure on the ring) and `book top` (last NBBO snapshot).
-
-For lowest local processing overhead, prefer `--release` (see release profile in `Cargo.toml`: LTO, single codegen unit).
+Stop with **Ctrl+C**. Logs include the **last NBBO** per symbol (integer tick prices).
 
 ## How to run (dashboard)
 
-The **`easy-rs-dashboard`** binary is built only with the **`dashboard`** Cargo feature. It uses the same **`.env`** / environment variables as the CLI (`APCA_*`, `EASY_RS_*`).
-
-From the repository root:
+The **`easy-rs-dashboard`** binary requires the **`dashboard`** feature. Same **`APCA_*`** and **`EASY_RS_*`** as the CLI.
 
 ```bash
 export APCA_API_KEY_ID="your-key-id"
 export APCA_API_SECRET_KEY="your-secret"
+export EASY_RS_SYMBOLS="SPY,AAPL"   # optional
 
-# Optional (same semantics as CLI)
-export EASY_RS_SYMBOLS="SPY,AAPL"
-export EASY_RS_ALPACA_FEED=iex    # or sip if your account has SIP
-export EASY_RS_RING_CAP=4096
-
-# Recommended: release build (faster UI + feed path)
 cargo run --release --features dashboard --bin easy-rs-dashboard
 ```
 
-Faster compile during development (slower at runtime):
+Development build:
 
 ```bash
 cargo run --features dashboard --bin easy-rs-dashboard
 ```
 
-**Stop:** close the application window (the feed shuts down), or press **Ctrl+C** in the terminal.
+**Stop:** close the window or **Ctrl+C** in the terminal.
 
-**What you should see:** a window with four panels—**bid–ask** (shaded spread), **NBBO liquidity heatmap** (log-scaled sizes at touch; the heatmap updates for the **selected** symbol only), **cumulative trade imbalance** (Lee–Ready vs last NBBO; stream trades have no explicit aggressor side), and **latency** in ms (`local_rx_ns.saturating_sub(ts_ns)`; skewed if the host clock is not NTP-synced). Pick a symbol from the combo box at the top.
+**Layout:** top row — **bid–ask** (smoothed lines + fill) and **latency**; bottom row — **heatmap** and **imbalance**. Time axis is **seconds relative to the earliest bucket** in the downsampled window (~120 s over 1024 buckets). Plots support **drag/zoom**; geometry is built only for the **visible** X range (viewport culling). The heatmap texture is re-uploaded when the aggregator bumps **`heatmap_version`** (or when you change symbol).
 
-**Tracy profiling** (optional): build with both features and enable Tracy when you attach the profiler:
+**Tracy:**
 
 ```bash
 cargo run --release --features "dashboard,tracy" --bin easy-rs-dashboard
-# export TRACY=1 before launch when using the Tracy profiler
 ```
 
 ## Architecture (short)
 
-1. **Cold path** — `tokio` task: WebSocket connect, subscribe to **quotes + trades**, JSON decode, convert Alpaca `Num` → integer ticks ([`PRICE_TICK_SCALE`](src/cold_path/ticks.rs) = `10^8`), enqueue [`QuoteEvent`](src/hot_path/quote_event.rs); optionally update [`VizStore`](src/viz/store.rs) for the dashboard.
-2. **Ring** — lock-free bounded queue; **drop-newest** on overflow ([`try_push_drop_newest`](src/hot_path/ring.rs)).
-3. **Hot path** — dedicated thread: drain queue, update synthetic orders so the book’s top of book matches the stream ([`run_consumer`](src/hot_path/applier.rs)). Trace-level spans can wrap batch drains (`RUST_LOG=trace`).
-4. **Registry** — symbols are sorted and deduped; ids are stable for the session ([`SymbolRegistry`](src/cold_path/symbols.rs), [`BookRegistry`](src/orderbook_store.rs)).
-
-Relevant crate docs in code: [`lib.rs`](src/lib.rs) (latency model sketch).
+1. **Cold path** — `tokio`: WebSocket, subscribe to quotes + trades; on each quote, **`Instant::now()` first**, then parse; normalize to [`QuoteEvent`](src/hot_path/quote_event.rs); [`AlpacaQuoteSink::on_quote`](src/cold_path/sink.rs) / `on_trade_msg` push compact [`FeedMsg`](src/cold_path/feed_msg.rs) to the dashboard queue (or ring / last-NBBO as configured).
+2. **Dashboard aggregator** — dedicated `std::thread` pops batches, time-bucket downsamples quotes ([`viz::pipeline`](src/viz/pipeline.rs)), runs Lee–Ready on trades, updates the focused-symbol heatmap, publishes **`Arc<DashboardSnapshot>`** via [`arc_swap`](https://docs.rs/arc-swap).
+3. **egui** — each frame: cheap `Arc` load of the snapshot; plot lines from the visible range only.
+4. **No hot book** — quotes are not replayed into `orderbook-rs`; use Alpaca’s NBBO directly.
+5. **Registry** — [`SymbolRegistry`](src/cold_path/symbols.rs): sorted, deduped symbols with stable ids.
 
 ## Using as a library
 
-Add the crate to your workspace (path or git dependency), enable a Tokio runtime in your binary, then wire:
+Wire [`run_alpaca_quotes`](src/cold_path/alpaca_feed.rs) with [`AlpacaFeedConfig`](src/cold_path/alpaca_feed.rs) and an [`AlpacaQuoteSink`](src/cold_path/sink.rs):
 
-- `SymbolRegistry`, `BookRegistry`, `new_quote_ring`, `run_consumer` (spawn the consumer thread), and `run_alpaca_quotes` with [`AlpacaFeedConfig`](src/cold_path/alpaca_feed.rs) / [`AlpacaFeedSource`](src/cold_path/alpaca_feed.rs).
-- Pass **`None`** as the last argument to `run_alpaca_quotes` if you do not need visualization, or **`Some(Arc<VizStore>)`** to record dashboard data (see [`src/bin/dashboard.rs`](src/bin/dashboard.rs)).
+- `AlpacaQuoteSink::headless_last_nbbo(n)` — CLI-style last quote buffer.
+- `AlpacaQuoteSink::dashboard(queue, dropped)` — push quotes/trades to a shared `ArrayQueue<FeedMsg>` only (no mutex viz on Tokio).
+- `AlpacaQuoteSink::with_ring(ring, dropped)` — optional bounded queue if you still want a producer/consumer split.
 
-Call **`easy_rs::init_tracing()`** once at startup if you want the same subscriber behavior as the shipped binaries.
-
-The stock binary in [`src/main.rs`](src/main.rs) is the reference headless integration (shutdown flag, Ctrl+C handler, final snapshot).
+Call **`easy_rs::init_tracing()`** once if you want the same subscriber as the binaries.
 
 ## Tests
 
 ```bash
 cargo test
-cargo test --all-features   # includes dashboard-only code paths where applicable
+cargo test --all-features
 ```
-
-Tests cover symbol registry, decimal-to-tick parsing, Lee–Ready classification, heatmap bin mapping, and viz store behavior.
 
 ## Troubleshooting
 
-- **Auth / subscription errors** — Verify keys, paper vs live URLs, and that your plan includes the feed you set (`EASY_RS_ALPACA_FEED=sip` needs SIP access).
-- **High `ring_dropped_events`** — Increase `EASY_RS_RING_CAP`, reduce symbol count, or profile whether the hot path or machine is the bottleneck.
-- **Empty or stale book** — Quotes must arrive and be enqueued; check `RUST_LOG=debug` for stream and handler warnings.
-- **Dashboard empty imbalance** — Needs live **trades** on your feed; quotes alone only drive spread, heatmap, and latency panels.
+- **Auth / subscription errors** — Keys, paper vs live URLs, and feed tier (`sip` needs SIP access).
+- **Dashboard imbalance empty** — Requires live **trades** on your feed; quotes alone fill spread, heatmap, and latency.
+- **Latency looks wrong** — Uses wall clock vs exchange time; sync NTP.
