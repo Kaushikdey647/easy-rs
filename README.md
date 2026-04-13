@@ -2,7 +2,7 @@
 
 Rust service that streams **stock quotes and trades** from [Alpaca](https://alpaca.markets/) over WebSocket and normalizes them on a **cold path** (Tokio + JSON decode + tick scaling). **NBBO comes straight from the feed**—there is no separate local order book, since Alpaca quotes are already top-of-book.
 
-An optional **`tui`** feature adds a **terminal dashboard** ([ratatui](https://github.com/ratatui/ratatui)): **NBBO bid and ask** over time and quote **latency** (local receive time − exchange timestamp). The UI reads a pre-aggregated **`DashboardSnapshot`** (downsampled time buckets) so the Tokio ingest path only parses and **lock-free enqueues**; a dedicated thread owns downsampling (and Lee–Ready state used internally for the same pipeline).
+An optional **`tui`** feature adds a **terminal dashboard** ([ratatui](https://github.com/ratatui/ratatui)): one **row per symbol** with **NBBO** (bid/ask × size), **mid**, **spread**, **spread %** (vs mid), **last trade** (price × size), and quote **latency** (local receive time − exchange timestamp). Values are **green/red vs the previous frame** when they tick up or down. The UI reads a pre-built **`DashboardSnapshot`** so the Tokio thread only **lock-free enqueues** quotes and trades; a dedicated thread merges them into per-symbol rows.
 
 License: GPL-3.0-or-later (see `Cargo.toml`).
 
@@ -11,11 +11,9 @@ License: GPL-3.0-or-later (see `Cargo.toml`).
 - Subscribes to Alpaca **v2 real-time quotes and trades** for one or more symbols.
 - Maps each quote to a compact [`QuoteEvent`](src/hot_path/quote_event.rs): integer prices at 8 decimal places, whole-share sizes, symbol id, **exchange timestamp** (`ts_ns`), **local receive time** (`local_rx_ns`) for display latency, and **`ingest_mono_ns`** (monotonic nanoseconds since process start) for pipeline timing.
 - Fans out each quote through [`AlpacaQuoteSink`](src/cold_path/sink.rs): optional bounded **ring** (for advanced use), optional **last-NBBO buffer** (CLI shutdown log), and/or a lock-free **`ArrayQueue<FeedMsg>`** for the TUI (**drop-newest** when full — see `EASY_RS_FEED_CAP` below).
-- **Trades** are forwarded for the aggregator (Lee–Ready / internal series); they are not written into any local book.
+- **Trades** are forwarded into the TUI’s `ArrayQueue` as [`FeedMsg::Trade`](src/cold_path/feed_msg.rs) so the dashboard can show **last sale** without touching a local order book.
 - **CLI** on **Ctrl+C**: stops the feed and logs the **last quoted NBBO** per symbol from the buffer.
-- **TUI**: live bid/ask and latency charts in the terminal; **q** or **Esc** exits; **Ctrl+C** also stops the feed.
-
-**Note:** `Cargo.toml` also lists Polars and `ta` for optional analytics; the default binaries use Alpaca + tracing + (optional) ratatui only.
+- **TUI**: multi-symbol **table** (NBBO, last trade, latency, delta colors); **q** or **Esc** exits; **Ctrl+C** also stops the feed.
 
 ## Requirements
 
@@ -98,7 +96,7 @@ cargo run --features tui --bin easy-rs-tui
 
 **Stop:** **q** or **Esc**, or **Ctrl+C** in the terminal.
 
-**Layout:** header (symbol, drop count); upper chart — **bid** and **ask** vs time; lower chart — **latency (ms)** vs time. Time axis is **seconds relative to the earliest bucket** in the downsampled window (~120 s over 1024 buckets). Use **Tab** / **Shift+Tab** or **←** / **→** to change symbol.
+**Layout:** header (local clock, symbol count, feed drop count); main panel — **one row per symbol** (registry order): bid/ask sizes, mid, spread, spread %, last trade, latency (ms). **q** / **Esc** quits (no symbol switching).
 
 **Tracy:**
 
@@ -108,9 +106,9 @@ cargo run --release --features "tui,tracy" --bin easy-rs-tui
 
 ## Architecture (short)
 
-1. **Cold path** — `tokio`: WebSocket, subscribe to quotes + trades; on each quote, **`Instant::now()` first**, then parse; normalize to [`QuoteEvent`](src/hot_path/quote_event.rs); [`AlpacaQuoteSink::on_quote`](src/cold_path/sink.rs) / `on_trade_msg` push compact [`FeedMsg`](src/cold_path/feed_msg.rs) to the TUI queue (or ring / last-NBBO as configured).
-2. **Aggregator** — dedicated `std::thread` pops batches, time-bucket downsamples quotes ([`viz::pipeline`](src/viz/pipeline.rs)), runs Lee–Ready on trades, updates the focused-symbol heatmap internally, publishes **`Arc<DashboardSnapshot>`** via [`arc_swap`](https://docs.rs/arc-swap).
-3. **ratatui** — each frame: cheap load of the snapshot; **Chart** widgets for bid/ask and latency.
+1. **Cold path** — `tokio`: WebSocket, subscribe to quotes + trades; on each quote, **`Instant::now()` first**, then parse; normalize to [`QuoteEvent`](src/hot_path/quote_event.rs); [`AlpacaQuoteSink::on_quote`](src/cold_path/sink.rs) / [`on_trade_msg`](src/cold_path/sink.rs) push [`FeedMsg`](src/cold_path/feed_msg.rs) to the TUI queue when configured (or ring / last-NBBO as configured).
+2. **Aggregator** — dedicated `std::thread` pops batches and **merges** last NBBO and last trade per symbol ([`viz::pipeline`](src/viz/pipeline.rs)), publishes **`Arc<DashboardSnapshot>`** via [`arc_swap`](https://docs.rs/arc-swap).
+3. **ratatui** — each frame: load the snapshot, render a **Table**, apply **delta colors** vs the previous frame.
 4. **No hot book** — quotes are not replayed into `orderbook-rs`; use Alpaca’s NBBO directly.
 5. **Registry** — [`SymbolRegistry`](src/cold_path/symbols.rs): sorted, deduped symbols with stable ids.
 
@@ -119,7 +117,7 @@ cargo run --release --features "tui,tracy" --bin easy-rs-tui
 Wire [`run_alpaca_quotes`](src/cold_path/alpaca_feed.rs) with [`AlpacaFeedConfig`](src/cold_path/alpaca_feed.rs) and an [`AlpacaQuoteSink`](src/cold_path/sink.rs):
 
 - `AlpacaQuoteSink::headless_last_nbbo(n)` — CLI-style last quote buffer.
-- `AlpacaQuoteSink::dashboard(queue, dropped)` — push quotes/trades to a shared `ArrayQueue<FeedMsg>` only (no mutex on the Tokio thread); used by the TUI binary.
+- `AlpacaQuoteSink::dashboard(queue, dropped)` — push **quotes and trades** to a shared `ArrayQueue<FeedMsg>`; used by the TUI binary.
 - `AlpacaQuoteSink::with_ring(ring, dropped)` — optional bounded queue if you still want a producer/consumer split.
 
 Call **`easy_rs::init_tracing()`** once if you want the same subscriber as the binaries.

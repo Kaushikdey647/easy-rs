@@ -1,4 +1,4 @@
-//! Terminal dashboard: NBBO bid/ask and quote latency (ratatui).
+//! Terminal dashboard: all symbols — NBBO, spread, last trade, latency — with tick-to-tick delta colors.
 //!
 //! Run: `cargo run --features tui --bin easy-rs-tui`
 //!
@@ -6,18 +6,18 @@
 //! Optional: `EASY_RS_FEED_CAP` — capacity of the lock-free ingest queue (default `65536`).
 //! When the queue is full, new events are dropped (drop-newest) and the count is shown in the header.
 
+use chrono::Local;
 use crossbeam_queue::ArrayQueue;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use easy_rs::SymbolRegistry;
 use easy_rs::cold_path::FeedMsg;
 use easy_rs::cold_path::time_anchor;
 use easy_rs::cold_path::{AlpacaFeedConfig, AlpacaFeedSource, AlpacaQuoteSink, run_alpaca_quotes};
-use easy_rs::viz::DashboardPipeline;
+use easy_rs::viz::{DashboardPipeline, NbboRow};
 use ratatui::DefaultTerminal;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Style, Stylize};
-use ratatui::symbols::Marker;
-use ratatui::widgets::{Axis, Block, Chart, Dataset, GraphType, LegendPosition, Paragraph};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -51,15 +51,64 @@ fn feed_queue_cap() -> usize {
         .unwrap_or(65_536)
 }
 
+#[inline]
+fn color_delta_f64(prev: f64, cur: f64, had_prev: bool, cur_ok: bool) -> Color {
+    if !cur_ok {
+        return Color::DarkGray;
+    }
+    if !had_prev {
+        return Color::White;
+    }
+    if cur > prev {
+        Color::Green
+    } else if cur < prev {
+        Color::Red
+    } else {
+        Color::White
+    }
+}
+
+#[inline]
+fn color_delta_u64(prev: u64, cur: u64, had_prev: bool, cur_ok: bool) -> Color {
+    if !cur_ok {
+        return Color::DarkGray;
+    }
+    if !had_prev {
+        return Color::White;
+    }
+    if cur > prev {
+        Color::Green
+    } else if cur < prev {
+        Color::Red
+    } else {
+        Color::White
+    }
+}
+
+#[inline]
+fn color_delta_f32(prev: f32, cur: f32, had_prev: bool, cur_ok: bool) -> Color {
+    if !cur_ok {
+        return Color::DarkGray;
+    }
+    if !had_prev {
+        return Color::White;
+    }
+    let d = f64::from(cur) - f64::from(prev);
+    if d > 0.001 {
+        Color::Green
+    } else if d < -0.001 {
+        Color::Red
+    } else {
+        Color::White
+    }
+}
+
 struct TuiApp {
     symbol_labels: Vec<String>,
     pipeline: Arc<DashboardPipeline>,
     shutdown: Arc<AtomicBool>,
-    /// Focused symbol index in `symbol_labels`.
-    selected: usize,
-    bid_pts: Vec<(f64, f64)>,
-    ask_pts: Vec<(f64, f64)>,
-    lat_pts: Vec<(f64, f64)>,
+    /// Previous frame (for green/red deltas).
+    prev_rows: Vec<NbboRow>,
 }
 
 impl TuiApp {
@@ -68,228 +117,206 @@ impl TuiApp {
         pipeline: Arc<DashboardPipeline>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
-        pipeline.heatmap_focus_symbol.store(0, Ordering::Relaxed);
+        let n = symbol_labels.len();
         Self {
             symbol_labels,
             pipeline,
             shutdown,
-            selected: 0,
-            bid_pts: Vec::new(),
-            ask_pts: Vec::new(),
-            lat_pts: Vec::new(),
+            prev_rows: vec![NbboRow::default(); n],
         }
-    }
-
-    fn cycle_symbol(&mut self, delta: isize) {
-        let n = self.symbol_labels.len();
-        if n == 0 {
-            return;
-        }
-        let i = self.selected as isize + delta;
-        let i = i.rem_euclid(n as isize) as usize;
-        self.selected = i;
-        self.pipeline
-            .heatmap_focus_symbol
-            .store(u16::try_from(i).unwrap_or(0), Ordering::Relaxed);
     }
 
     fn draw(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        let snap = self.pipeline.snapshot.load();
+        let dropped = self.pipeline.feed_dropped.load(Ordering::Relaxed);
+        let clock = Local::now().format("%H:%M:%S%.3f").to_string();
+        let header = format!(
+            " easy-rs │ {clock} │ symbols: {} │ feed drops: {dropped} │ q quit ",
+            self.symbol_labels.len()
+        );
+
+        let prev = &self.prev_rows;
+        let mut rows: Vec<Row> = vec![Row::new(vec![
+            Cell::from("SYMBOL")
+                .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+            Cell::from("BID").style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+            Cell::from("B SZ").style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+            Cell::from("ASK").style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+            Cell::from("A SZ").style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+            Cell::from("MID").style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+            Cell::from("SPRD").style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+            Cell::from("SPR%").style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+            Cell::from("LAST").style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+            Cell::from("L SZ").style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+            Cell::from("LAT ms").style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+        ])];
+
+        for (i, sym) in self.symbol_labels.iter().enumerate() {
+            let cur = snap.symbols.get(i).cloned().unwrap_or_default();
+            let p = prev.get(i).cloned().unwrap_or_default();
+
+            let mid = if cur.valid {
+                (cur.bid + cur.ask) / 2.0
+            } else {
+                f64::NAN
+            };
+            let mid_ok = cur.valid && mid.is_finite();
+            let mid_prev = if p.valid {
+                (p.bid + p.ask) / 2.0
+            } else {
+                f64::NAN
+            };
+            let mid_prev_ok = p.valid && mid_prev.is_finite();
+
+            let spr_pct_ok = cur.valid && cur.spread_pct.is_finite();
+            let spr_pct_prev_ok = p.valid && p.spread_pct.is_finite();
+
+            let last_ok = cur.last_sz > 0;
+            let last_prev_ok = p.last_sz > 0;
+
+            let lat_ok = cur.valid;
+            let lat_prev_ok = p.valid;
+
+            let dash = "—";
+            let bid_s = if cur.valid {
+                format!("{:>10.4}", cur.bid)
+            } else {
+                dash.to_string()
+            };
+            let ask_s = if cur.valid {
+                format!("{:>10.4}", cur.ask)
+            } else {
+                dash.to_string()
+            };
+            let mid_s = if mid_ok {
+                format!("{:>10.4}", mid)
+            } else {
+                dash.to_string()
+            };
+            let spr_s = if cur.valid {
+                format!("{:>9.4}", cur.spread_abs)
+            } else {
+                dash.to_string()
+            };
+            let pct_s = if spr_pct_ok {
+                format!("{:>7.4}%", cur.spread_pct)
+            } else {
+                dash.to_string()
+            };
+            let last_s = if last_ok {
+                format!("{:>10.4}", cur.last_px)
+            } else {
+                dash.to_string()
+            };
+            let lat_s = if lat_ok {
+                format!("{:>8.2}", cur.lat_ms)
+            } else {
+                dash.to_string()
+            };
+
+            rows.push(Row::new(vec![
+                Cell::from(sym.as_str()),
+                Cell::from(bid_s).style(Style::default().fg(color_delta_f64(
+                    p.bid, cur.bid, p.valid, cur.valid,
+                ))),
+                Cell::from(if cur.valid {
+                    format!("{:>6}", cur.bid_sz)
+                } else {
+                    dash.to_string()
+                })
+                .style(Style::default().fg(color_delta_u64(
+                    p.bid_sz,
+                    cur.bid_sz,
+                    p.valid,
+                    cur.valid,
+                ))),
+                Cell::from(ask_s).style(Style::default().fg(color_delta_f64(
+                    p.ask, cur.ask, p.valid, cur.valid,
+                ))),
+                Cell::from(if cur.valid {
+                    format!("{:>6}", cur.ask_sz)
+                } else {
+                    dash.to_string()
+                })
+                .style(Style::default().fg(color_delta_u64(
+                    p.ask_sz,
+                    cur.ask_sz,
+                    p.valid,
+                    cur.valid,
+                ))),
+                Cell::from(mid_s).style(Style::default().fg(color_delta_f64(
+                    mid_prev,
+                    mid,
+                    mid_prev_ok,
+                    mid_ok,
+                ))),
+                Cell::from(spr_s).style(Style::default().fg(color_delta_f64(
+                    p.spread_abs,
+                    cur.spread_abs,
+                    p.valid,
+                    cur.valid,
+                ))),
+                Cell::from(pct_s).style(Style::default().fg(color_delta_f64(
+                    p.spread_pct,
+                    cur.spread_pct,
+                    spr_pct_prev_ok,
+                    spr_pct_ok,
+                ))),
+                Cell::from(last_s).style(Style::default().fg(color_delta_f64(
+                    p.last_px,
+                    cur.last_px,
+                    last_prev_ok,
+                    last_ok,
+                ))),
+                Cell::from(if last_ok {
+                    format!("{:>6}", cur.last_sz)
+                } else {
+                    dash.to_string()
+                })
+                .style(Style::default().fg(color_delta_u64(
+                    p.last_sz,
+                    cur.last_sz,
+                    last_prev_ok,
+                    last_ok,
+                ))),
+                Cell::from(lat_s).style(Style::default().fg(color_delta_f32(
+                    p.lat_ms,
+                    cur.lat_ms,
+                    lat_prev_ok,
+                    lat_ok,
+                ))),
+            ]));
+        }
+
+        let widths = [
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(6),
+            Constraint::Length(10),
+            Constraint::Length(6),
+            Constraint::Length(10),
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(10),
+            Constraint::Length(6),
+            Constraint::Length(8),
+        ];
+
+        let table = Table::new(rows, widths).block(Block::bordered().title(" Live NBBO "));
+
         terminal.draw(|frame| {
-            let snap = self.pipeline.snapshot.load();
-            let sym = snap
-                .symbols
-                .get(self.selected)
-                .cloned()
-                .unwrap_or_default();
-
-            self.bid_pts.clear();
-            self.ask_pts.clear();
-            self.lat_pts.clear();
-            for i in 0..sym.t_rel.len() {
-                let t = sym.t_rel[i];
-                if i < sym.bid.len() {
-                    self.bid_pts.push((t, sym.bid[i]));
-                }
-                if i < sym.ask.len() {
-                    self.ask_pts.push((t, sym.ask[i]));
-                }
-                if i < sym.lat_ms.len() {
-                    self.lat_pts.push((t, f64::from(sym.lat_ms[i])));
-                }
-            }
-
-            let dropped = self.pipeline.feed_dropped.load(Ordering::Relaxed);
-            let sym_name = self
-                .symbol_labels
-                .get(self.selected)
-                .map(String::as_str)
-                .unwrap_or("—");
-
-            let header = format!(
-                " easy-rs │ {sym_name} │ feed drops (queue full): {dropped} │ Tab/←/→ symbol │ q quit "
-            );
-            let areas = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
-            ])
-            .split(frame.area());
-
+            let areas = Layout::vertical([Constraint::Length(1), Constraint::Min(0)])
+                .split(frame.area());
             frame.render_widget(
                 Paragraph::new(header).style(Style::default().bg(Color::DarkGray).fg(Color::White)),
                 areas[0],
             );
-
-            if self.bid_pts.is_empty() && self.ask_pts.is_empty() {
-                let empty = Paragraph::new("Waiting for quotes…".dark_gray())
-                    .block(Block::bordered().title(" Bid / Ask (NBBO) ").border_style(Style::default().fg(Color::DarkGray)));
-                frame.render_widget(empty, areas[1]);
-            } else {
-                let (x_min, x_max) = axis_range_x(&self.bid_pts, &self.ask_pts);
-                let (y_min, y_max) = axis_range_y_price(&self.bid_pts, &self.ask_pts);
-                let x_labels = three_labels(x_min, x_max, |v| format!("{v:.1}"));
-                let y_labels = three_labels(y_min, y_max, |v| format!("{v:.4}"));
-
-                let spread_chart = Chart::new(vec![
-                    Dataset::default()
-                        .name("bid")
-                        .marker(Marker::Braille)
-                        .graph_type(GraphType::Line)
-                        .style(Style::default().fg(Color::Green))
-                        .data(&self.bid_pts),
-                    Dataset::default()
-                        .name("ask")
-                        .marker(Marker::Braille)
-                        .graph_type(GraphType::Line)
-                        .style(Style::default().fg(Color::Red))
-                        .data(&self.ask_pts),
-                ])
-                .block(Block::bordered().title(" Bid / Ask (NBBO) "))
-                .x_axis(
-                    Axis::default()
-                        .title("t − t0 (s)".fg(Color::Gray))
-                        .style(Style::default().fg(Color::DarkGray))
-                        .bounds([x_min, x_max])
-                        .labels(x_labels),
-                )
-                .y_axis(
-                    Axis::default()
-                        .title("px".fg(Color::Gray))
-                        .style(Style::default().fg(Color::DarkGray))
-                        .bounds([y_min, y_max])
-                        .labels(y_labels),
-                )
-                .legend_position(Some(LegendPosition::TopRight));
-                frame.render_widget(spread_chart, areas[1]);
-            }
-
-            if self.lat_pts.is_empty() {
-                let empty = Paragraph::new("Waiting for quotes…".dark_gray()).block(
-                    Block::bordered()
-                        .title(" Latency (local_rx − exchange ts) ")
-                        .border_style(Style::default().fg(Color::DarkGray)),
-                );
-                frame.render_widget(empty, areas[2]);
-            } else {
-                let (x_min, x_max) = axis_range_x_lat(&self.lat_pts);
-                let (y_min, y_max) = axis_range_y_scalar(&self.lat_pts);
-                let x_labels = three_labels(x_min, x_max, |v| format!("{v:.1}"));
-                let y_labels = three_labels(y_min, y_max, |v| format!("{v:.2}"));
-
-                let lat_chart = Chart::new(vec![Dataset::default()
-                    .name("ms")
-                    .marker(Marker::Braille)
-                    .graph_type(GraphType::Line)
-                    .style(Style::default().fg(Color::Magenta))
-                    .data(&self.lat_pts)])
-                .block(Block::bordered().title(" Latency (ms) "))
-                .x_axis(
-                    Axis::default()
-                        .title("t − t0 (s)".fg(Color::Gray))
-                        .style(Style::default().fg(Color::DarkGray))
-                        .bounds([x_min, x_max])
-                        .labels(x_labels),
-                )
-                .y_axis(
-                    Axis::default()
-                        .title("ms".fg(Color::Gray))
-                        .style(Style::default().fg(Color::DarkGray))
-                        .bounds([y_min, y_max])
-                        .labels(y_labels),
-                )
-                .legend_position(Some(LegendPosition::TopRight));
-                frame.render_widget(lat_chart, areas[2]);
-            }
+            frame.render_widget(table, areas[1]);
         })?;
+
+        self.prev_rows = snap.symbols.clone();
         Ok(())
     }
-}
-
-fn axis_range_x(bid: &[(f64, f64)], ask: &[(f64, f64)]) -> (f64, f64) {
-    let mut xs: Vec<f64> = bid
-        .iter()
-        .map(|p| p.0)
-        .chain(ask.iter().map(|p| p.0))
-        .collect();
-    if xs.is_empty() {
-        return (0.0, 1.0);
-    }
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let lo = xs[0];
-    let hi = *xs.last().unwrap();
-    pad_range(lo, hi, 0.02)
-}
-
-fn axis_range_x_lat(lat: &[(f64, f64)]) -> (f64, f64) {
-    if lat.is_empty() {
-        return (0.0, 1.0);
-    }
-    let lo = lat.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
-    let hi = lat.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
-    pad_range(lo, hi, 0.02)
-}
-
-fn axis_range_y_price(bid: &[(f64, f64)], ask: &[(f64, f64)]) -> (f64, f64) {
-    let ys: Vec<f64> = bid
-        .iter()
-        .map(|p| p.1)
-        .chain(ask.iter().map(|p| p.1))
-        .collect();
-    if ys.is_empty() {
-        return (0.0, 1.0);
-    }
-    let lo = ys.iter().copied().fold(f64::INFINITY, f64::min);
-    let hi = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    pad_range(lo, hi, 0.001)
-}
-
-fn axis_range_y_scalar(pts: &[(f64, f64)]) -> (f64, f64) {
-    if pts.is_empty() {
-        return (0.0, 1.0);
-    }
-    let lo = pts.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
-    let hi = pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
-    pad_range(lo, hi, 0.08)
-}
-
-fn pad_range(lo: f64, hi: f64, frac: f64) -> (f64, f64) {
-    if !lo.is_finite() || !hi.is_finite() {
-        return (0.0, 1.0);
-    }
-    if (hi - lo).abs() < 1e-12 {
-        return (lo - 0.5, hi + 0.5);
-    }
-    let pad = (hi - lo) * frac;
-    (lo - pad, hi + pad)
-}
-
-fn three_labels<F: Fn(f64) -> String>(
-    lo: f64,
-    hi: f64,
-    fmt: F,
-) -> [ratatui::text::Line<'static>; 3] {
-    let mid = (lo + hi) / 2.0;
-    [fmt(lo).into(), fmt(mid).into(), fmt(hi).into()]
 }
 
 fn run_tui(app: &mut TuiApp, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -303,10 +330,6 @@ fn run_tui(app: &mut TuiApp, terminal: &mut DefaultTerminal) -> io::Result<()> {
                         app.shutdown.store(true, Ordering::SeqCst);
                         break;
                     }
-                    KeyCode::Tab => app.cycle_symbol(1),
-                    KeyCode::BackTab => app.cycle_symbol(-1),
-                    KeyCode::Right => app.cycle_symbol(1),
-                    KeyCode::Left => app.cycle_symbol(-1),
                     _ => {}
                 },
                 _ => {}

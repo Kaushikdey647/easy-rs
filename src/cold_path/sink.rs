@@ -1,4 +1,5 @@
 //! Where normalized quotes go after the WebSocket decode (ring, last-NBBO mirror, TUI/aggregator queue).
+//! The TUI [`AlpacaQuoteSink::dashboard`] path enqueues **quotes and trades** so the UI can show last sale alongside NBBO.
 
 use crate::cold_path::feed_msg::FeedMsg;
 use crate::hot_path::quote_event::QuoteEvent;
@@ -9,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Optional outputs for each quote. All fields are independent: enable only what you need.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AlpacaQuoteSink {
     /// Bounded queue + drop counter (legacy path); `dropped` must be set when this is set.
     pub ring: Option<QuoteRing>,
@@ -19,6 +20,21 @@ pub struct AlpacaQuoteSink {
     /// Aggregator / TUI handoff: lock-free queue; **drop-newest** when full (keeps backlog age bounded).
     pub feed_queue: Option<Arc<ArrayQueue<FeedMsg>>>,
     pub feed_dropped: Option<Arc<AtomicU64>>,
+    /// When `false`, [`Self::on_trade_msg`] does not push [`FeedMsg::Trade`](FeedMsg::Trade) to `feed_queue`.
+    pub enqueue_trades: bool,
+}
+
+impl Default for AlpacaQuoteSink {
+    fn default() -> Self {
+        Self {
+            ring: None,
+            dropped: None,
+            last_nbbo: None,
+            feed_queue: None,
+            feed_dropped: None,
+            enqueue_trades: true,
+        }
+    }
 }
 
 impl AlpacaQuoteSink {
@@ -32,11 +48,12 @@ impl AlpacaQuoteSink {
         (sink, last)
     }
 
-    /// Terminal UI / aggregator: push quotes/trades to `feed_queue` only (no mutex on the Tokio thread).
+    /// Terminal UI / aggregator: push **quotes and trades** to `feed_queue` (no mutex on the Tokio thread).
     pub fn dashboard(feed: Arc<ArrayQueue<FeedMsg>>, feed_dropped: Arc<AtomicU64>) -> Self {
         Self {
             feed_queue: Some(feed),
             feed_dropped: Some(feed_dropped),
+            enqueue_trades: true,
             ..Default::default()
         }
     }
@@ -83,6 +100,9 @@ impl AlpacaQuoteSink {
 
     #[inline]
     pub fn on_trade_msg(&self, symbol_id: u16, px_ticks: u64, sz: u64, ts_ns: u64) {
+        if !self.enqueue_trades {
+            return;
+        }
         self.try_push_feed(FeedMsg::Trade {
             symbol_id,
             px_ticks,
