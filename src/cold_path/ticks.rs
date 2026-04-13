@@ -33,11 +33,7 @@ fn parse_decimal_to_scaled_u64(s: &str, decimals: u32) -> Option<u64> {
         return None;
     }
 
-    let int_part = if int_part.is_empty() {
-        "0"
-    } else {
-        int_part
-    };
+    let int_part = if int_part.is_empty() { "0" } else { int_part };
 
     let mut frac = frac_part.to_string();
     if (frac.len() as u32) < decimals {

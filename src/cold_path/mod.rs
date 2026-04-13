@@ -7,6 +7,6 @@ pub mod symbols;
 pub mod ticks;
 pub mod time_anchor;
 
-pub use alpaca_feed::{run_alpaca_quotes, AlpacaFeedConfig, AlpacaFeedSource};
+pub use alpaca_feed::{AlpacaFeedConfig, AlpacaFeedSource, run_alpaca_quotes};
 pub use feed_msg::FeedMsg;
 pub use sink::AlpacaQuoteSink;

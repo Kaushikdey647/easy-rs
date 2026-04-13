@@ -1,12 +1,12 @@
-//! Where normalized quotes go after the WebSocket decode (ring, last-NBBO mirror, dashboard queue).
+//! Where normalized quotes go after the WebSocket decode (ring, last-NBBO mirror, TUI/aggregator queue).
 
 use crate::cold_path::feed_msg::FeedMsg;
 use crate::hot_path::quote_event::QuoteEvent;
-use crate::hot_path::ring::{try_push_drop_newest, QuoteRing, RingPushOutcome};
+use crate::hot_path::ring::{QuoteRing, RingPushOutcome, try_push_drop_newest};
 use crossbeam_queue::ArrayQueue;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Optional outputs for each quote. All fields are independent: enable only what you need.
 #[derive(Clone, Default)]
@@ -16,7 +16,7 @@ pub struct AlpacaQuoteSink {
     pub dropped: Option<Arc<AtomicU64>>,
     /// Latest quote per `symbol_id` for headless logging or metrics.
     pub last_nbbo: Option<Arc<Mutex<Vec<Option<QuoteEvent>>>>>,
-    /// Dashboard handoff: lock-free queue; **drop-newest** when full (keeps backlog age bounded).
+    /// Aggregator / TUI handoff: lock-free queue; **drop-newest** when full (keeps backlog age bounded).
     pub feed_queue: Option<Arc<ArrayQueue<FeedMsg>>>,
     pub feed_dropped: Option<Arc<AtomicU64>>,
 }
@@ -32,7 +32,7 @@ impl AlpacaQuoteSink {
         (sink, last)
     }
 
-    /// Dashboard: push quotes/trades to `feed_queue` only (no mutex viz on the Tokio thread).
+    /// Terminal UI / aggregator: push quotes/trades to `feed_queue` only (no mutex on the Tokio thread).
     pub fn dashboard(feed: Arc<ArrayQueue<FeedMsg>>, feed_dropped: Arc<AtomicU64>) -> Self {
         Self {
             feed_queue: Some(feed),

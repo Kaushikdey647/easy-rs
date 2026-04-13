@@ -1,14 +1,14 @@
 //! Dedicated aggregator thread: pops [`FeedMsg`](crate::cold_path::FeedMsg), downsamples quotes into
 //! fixed buckets, runs Lee–Ready on trades, updates heatmap for the focused symbol, publishes
-//! [`DashboardSnapshot`] via [`arc_swap::ArcSwap`].
+//! [`DashboardSnapshot`] via [`arc_swap::ArcSwap`] for the terminal UI (and library consumers).
 
 use crate::cold_path::feed_msg::FeedMsg;
 use crate::cold_path::ticks::PRICE_TICK_SCALE;
 use crate::viz::classify::{lee_ready_signed_volume, price_to_row};
 use arc_swap::ArcSwap;
 use crossbeam_queue::ArrayQueue;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Downsample grid size (power of two for cheap masking).
@@ -147,7 +147,11 @@ impl DashboardPipeline {
         })
     }
 
-    pub fn spawn_aggregator(self: &Arc<Self>, queue: Arc<ArrayQueue<FeedMsg>>, shutdown: Arc<AtomicBool>) {
+    pub fn spawn_aggregator(
+        self: &Arc<Self>,
+        queue: Arc<ArrayQueue<FeedMsg>>,
+        shutdown: Arc<AtomicBool>,
+    ) {
         let me = Arc::clone(self);
         let q = Arc::clone(&queue);
         let sd = Arc::clone(&shutdown);
@@ -301,7 +305,11 @@ fn build_snapshot(
     }
 }
 
-fn aggregator_loop(pipe: Arc<DashboardPipeline>, queue: Arc<ArrayQueue<FeedMsg>>, shutdown: Arc<AtomicBool>) {
+fn aggregator_loop(
+    pipe: Arc<DashboardPipeline>,
+    queue: Arc<ArrayQueue<FeedMsg>>,
+    shutdown: Arc<AtomicBool>,
+) {
     let n_sym = pipe.snapshot.load().symbols.len();
     let mut states: Vec<AggSymbol> = (0..n_sym).map(|_| AggSymbol::new()).collect();
     let bucket_ns = bucket_ns_from_window();
@@ -328,24 +336,12 @@ fn aggregator_loop(pipe: Arc<DashboardPipeline>, queue: Arc<ArrayQueue<FeedMsg>>
         }
 
         let focus = pipe.heatmap_focus_symbol.load(Ordering::Relaxed);
-        let snap = build_snapshot(
-            &states,
-            bucket_sec,
-            heatmap_version,
-            focus,
-            &mut scratch,
-        );
+        let snap = build_snapshot(&states, bucket_sec, heatmap_version, focus, &mut scratch);
         pipe.snapshot.store(Arc::new(snap));
     }
 
     let focus = pipe.heatmap_focus_symbol.load(Ordering::Relaxed);
-    let snap = build_snapshot(
-        &states,
-        bucket_sec,
-        heatmap_version,
-        focus,
-        &mut scratch,
-    );
+    let snap = build_snapshot(&states, bucket_sec, heatmap_version, focus, &mut scratch);
     pipe.snapshot.store(Arc::new(snap));
 }
 

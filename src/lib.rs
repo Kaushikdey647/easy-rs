@@ -15,7 +15,7 @@ pub use cold_path::symbols::SymbolRegistry;
 pub use cold_path::ticks;
 pub use cold_path::{AlpacaFeedConfig, AlpacaFeedSource, AlpacaQuoteSink};
 pub use hot_path::quote_event::QuoteEvent;
-pub use hot_path::{new_quote_ring, QuoteRing};
+pub use hot_path::{QuoteRing, new_quote_ring};
 
 /// Install `tracing` with `RUST_LOG` (default `info`). Set `EASY_RS_TRACING_SPANS=1` to log span close
 /// timings on stderr (use `RUST_LOG=trace` for verbose spans). With `--features tracy`, also set
@@ -27,9 +27,9 @@ pub fn init_tracing() {
     #[cfg(feature = "tracy")]
     {
         if std::env::var("TRACY").as_deref() == Ok("1") {
+            use tracing_subscriber::Layer;
             use tracing_subscriber::layer::SubscriberExt;
             use tracing_subscriber::util::SubscriberInitExt;
-            use tracing_subscriber::Layer;
             let fmt = tracing_subscriber::fmt::layer()
                 .with_writer(std::io::stderr)
                 .with_filter(filter.clone());

@@ -4,13 +4,13 @@ use crate::cold_path::sink::AlpacaQuoteSink;
 use crate::cold_path::symbols::SymbolRegistry;
 use crate::cold_path::ticks::{num_to_tick_u64, num_to_whole_shares};
 use crate::hot_path::quote_event::QuoteEvent;
-use apca::data::v2::stream::{drive, Data, IEX, MarketData, RealtimeData, SIP, Source};
+use apca::data::v2::stream::{Data, IEX, MarketData, RealtimeData, SIP, Source, drive};
 use apca::{ApiInfo, Client, Error};
 use chrono::{DateTime, Utc};
 use futures::FutureExt;
 use futures::StreamExt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tracing::instrument;
 
@@ -110,7 +110,11 @@ fn wall_ns() -> u64 {
         .unwrap_or(0)
 }
 
-fn handle_payload(registry: &SymbolRegistry, sink: &AlpacaQuoteSink, payload: Data) -> Result<(), &'static str> {
+fn handle_payload(
+    registry: &SymbolRegistry,
+    sink: &AlpacaQuoteSink,
+    payload: Data,
+) -> Result<(), &'static str> {
     match payload {
         Data::Quote(q) => handle_quote(registry, sink, q),
         Data::Trade(t) => {
@@ -161,7 +165,11 @@ fn handle_quote(
 }
 
 #[instrument(skip_all, fields(symbol = %t.symbol))]
-fn handle_trade(registry: &SymbolRegistry, sink: &AlpacaQuoteSink, t: apca::data::v2::stream::Trade) -> Result<(), &'static str> {
+fn handle_trade(
+    registry: &SymbolRegistry,
+    sink: &AlpacaQuoteSink,
+    t: apca::data::v2::stream::Trade,
+) -> Result<(), &'static str> {
     let Some(symbol_id) = registry.id(t.symbol.as_str()) else {
         return Ok(());
     };

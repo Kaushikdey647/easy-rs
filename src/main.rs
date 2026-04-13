@@ -1,10 +1,10 @@
 //! Alpaca quote/trade stream (cold path) with optional sinks—no local order book.
 
 use apca::Error as AlpacaError;
-use easy_rs::cold_path::{run_alpaca_quotes, AlpacaFeedConfig, AlpacaFeedSource, AlpacaQuoteSink};
 use easy_rs::SymbolRegistry;
-use std::sync::atomic::{AtomicBool, Ordering};
+use easy_rs::cold_path::{AlpacaFeedConfig, AlpacaFeedSource, AlpacaQuoteSink, run_alpaca_quotes};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::info;
 
 fn parse_feed_source() -> AlpacaFeedSource {

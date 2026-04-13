@@ -1,4 +1,4 @@
-//! Lock-free handoff messages from ingestion (Tokio) to the dashboard aggregator.
+//! Lock-free handoff messages from ingestion (Tokio) to the aggregator (e.g. TUI).
 
 use crate::hot_path::quote_event::QuoteEvent;
 
