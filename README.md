@@ -84,28 +84,40 @@ Stop with **Ctrl+C**. Watch for log lines that include `ring_dropped_events` (pr
 
 For lowest local processing overhead, prefer `--release` (see release profile in `Cargo.toml`: LTO, single codegen unit).
 
-## Desktop dashboard (optional)
+## How to run (dashboard)
 
-Build and run with the **`dashboard`** feature:
+The **`easy-rs-dashboard`** binary is built only with the **`dashboard`** Cargo feature. It uses the same **`.env`** / environment variables as the CLI (`APCA_*`, `EASY_RS_*`).
+
+From the repository root:
 
 ```bash
+export APCA_API_KEY_ID="your-key-id"
+export APCA_API_SECRET_KEY="your-secret"
+
+# Optional (same semantics as CLI)
+export EASY_RS_SYMBOLS="SPY,AAPL"
+export EASY_RS_ALPACA_FEED=iex    # or sip if your account has SIP
+export EASY_RS_RING_CAP=4096
+
+# Recommended: release build (faster UI + feed path)
 cargo run --release --features dashboard --bin easy-rs-dashboard
 ```
 
-Uses the same Alpaca and `EASY_RS_*` variables as the CLI. The window includes:
+Faster compile during development (slower at runtime):
 
-- **Bid–ask** plot with shaded spread.
-- **NBBO liquidity heatmap** (log-scaled sizes at touch; heatmap columns update for the **selected** symbol to save work).
-- **Cumulative trade imbalance** (Lee–Ready vs last NBBO; Alpaca stream trades have no explicit aggressor side).
-- **Latency** in ms: `local_rx_ns.saturating_sub(ts_ns)` (host clock skew can make this misleading if NTP is off).
+```bash
+cargo run --features dashboard --bin easy-rs-dashboard
+```
 
-Switch symbols from the top combo box. Closing the window signals shutdown so the feed thread can exit.
+**Stop:** close the application window (the feed shuts down), or press **Ctrl+C** in the terminal.
 
-Optional Tracy build:
+**What you should see:** a window with four panels—**bid–ask** (shaded spread), **NBBO liquidity heatmap** (log-scaled sizes at touch; the heatmap updates for the **selected** symbol only), **cumulative trade imbalance** (Lee–Ready vs last NBBO; stream trades have no explicit aggressor side), and **latency** in ms (`local_rx_ns.saturating_sub(ts_ns)`; skewed if the host clock is not NTP-synced). Pick a symbol from the combo box at the top.
+
+**Tracy profiling** (optional): build with both features and enable Tracy when you attach the profiler:
 
 ```bash
 cargo run --release --features "dashboard,tracy" --bin easy-rs-dashboard
-# with TRACY=1 in the environment when using the Tracy profiler
+# export TRACY=1 before launch when using the Tracy profiler
 ```
 
 ## Architecture (short)
