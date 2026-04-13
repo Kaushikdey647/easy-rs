@@ -41,6 +41,8 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 [[package]]
 name = "apca"
 version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fd6020973dd8af9515252f62c3e4a123f918077832cf96717f88f7bee232549"
 dependencies = [
  "async-compression",
  "async-trait",
@@ -688,6 +690,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
 name = "dwrote"
 version = "0.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -712,6 +720,7 @@ dependencies = [
  "apca",
  "chrono",
  "crossbeam-queue",
+ "dotenvy",
  "futures",
  "num-decimal",
  "orderbook-rs",
@@ -1836,6 +1845,8 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "orderbook-rs"
 version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6dfca99a8f14e4a86366804fc756da5623480d9613834f9d3a55368d95b2961"
 dependencies = [
  "bitflags 2.11.0",
  "crossbeam",

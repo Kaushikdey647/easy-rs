@@ -38,6 +38,9 @@ fn ring_capacity() -> usize {
 
 /// Core logic uses `apca::Error` end-to-end so `?` works without boxing to `dyn Error`.
 async fn run() -> Result<(), AlpacaError> {
+    // Load `.env` from the current working directory if present. Does not override existing vars.
+    let _ = dotenvy::dotenv();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

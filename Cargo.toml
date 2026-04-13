@@ -10,6 +10,7 @@ orderbook-rs = "0.6.1"
 pricelevel = "0.7"
 chrono = "0.4"
 crossbeam-queue = { version = "0.3", default-features = false }
+dotenvy = "0.15"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 num-decimal = { version = "0.2.4", default-features = false, features = ["num-v04", "serde"] }
 polars = { version = "0.51", features = ["lazy", "temporal", "fmt"] }
