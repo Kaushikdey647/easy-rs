@@ -1,5 +1,6 @@
 # easy-rs
 
+
 Rust service that streams **stock quotes and trades** from [Alpaca](https://alpaca.markets/) over WebSocket and normalizes them on a **cold path** (Tokio + JSON decode + tick scaling). **NBBO comes straight from the feed**—there is no separate local order book, since Alpaca quotes are already top-of-book.
 
 An optional **`tui`** feature adds a **terminal dashboard** ([ratatui](https://github.com/ratatui/ratatui)): one **row per symbol** with **NBBO** (bid/ask × size), **mid**, **spread**, **spread %** (vs mid), **last trade** (price × size), and quote **latency** (local receive time − exchange timestamp). Values are **green/red vs the previous frame** when they tick up or down. The UI reads a pre-built **`DashboardSnapshot`** so the Tokio thread only **lock-free enqueues** quotes and trades; a dedicated thread merges them into per-symbol rows.
