@@ -52,9 +52,14 @@ async fn run() -> Result<(), AlpacaError> {
         shutdown_signal.store(true, Ordering::SeqCst);
     });
 
+    let subscribe_bars = std::env::var("EASY_RS_ALPACA_BARS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     let cfg = AlpacaFeedConfig {
         source: parse_feed_source(),
         symbols: registry.symbols_sorted().to_vec(),
+        subscribe_bars,
     };
 
     run_alpaca_quotes(cfg, registry, sink, Arc::clone(&shutdown)).await?;

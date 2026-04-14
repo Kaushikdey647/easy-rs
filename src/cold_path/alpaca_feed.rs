@@ -3,6 +3,7 @@
 use crate::cold_path::sink::AlpacaQuoteSink;
 use crate::cold_path::symbols::SymbolRegistry;
 use crate::cold_path::ticks::{num_to_tick_u64, num_to_whole_shares};
+use crate::data::OhlcvBar;
 use crate::hot_path::quote_event::QuoteEvent;
 use apca::data::v2::stream::{Data, IEX, MarketData, RealtimeData, SIP, Source, drive};
 use apca::{ApiInfo, Client, Error};
@@ -24,6 +25,8 @@ pub enum AlpacaFeedSource {
 pub struct AlpacaFeedConfig {
     pub source: AlpacaFeedSource,
     pub symbols: Vec<String>,
+    /// When `true`, subscribe to Alpaca aggregate bars for `symbols` and forward them via [`AlpacaQuoteSink::on_bar`].
+    pub subscribe_bars: bool,
 }
 
 pub async fn run_alpaca_quotes(
@@ -55,6 +58,9 @@ where
     let mut data = MarketData::default();
     data.set_quotes(cfg.symbols.clone());
     data.set_trades(cfg.symbols.clone());
+    if cfg.subscribe_bars {
+        data.set_bars(cfg.symbols.clone());
+    }
 
     let sub = subscription.subscribe(&data).boxed();
     let drove = drive(sub, &mut stream).await;
@@ -121,7 +127,7 @@ fn handle_payload(
             handle_trade(registry, sink, t)?;
             Ok(())
         }
-        Data::Bar(_) => Ok(()),
+        Data::Bar(b) => handle_bar(registry, sink, b),
         #[allow(unreachable_patterns)]
         _ => Ok(()),
     }
@@ -161,6 +167,19 @@ fn handle_quote(
     };
 
     sink.on_quote(ev);
+    Ok(())
+}
+
+#[instrument(skip_all, fields(symbol = %b.symbol))]
+fn handle_bar(
+    registry: &SymbolRegistry,
+    sink: &AlpacaQuoteSink,
+    b: apca::data::v2::stream::Bar,
+) -> Result<(), &'static str> {
+    let Some(symbol_id) = registry.id(b.symbol.as_str()) else {
+        return Ok(());
+    };
+    sink.on_bar(symbol_id, OhlcvBar::from(&b));
     Ok(())
 }
 

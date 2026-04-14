@@ -376,9 +376,14 @@ fn main() -> io::Result<()> {
                 shutdown_signal.store(true, Ordering::SeqCst);
             });
 
+            let subscribe_bars = std::env::var("EASY_RS_ALPACA_BARS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+
             let cfg = AlpacaFeedConfig {
                 source: parse_feed_source(),
                 symbols: feed_symbols,
+                subscribe_bars,
             };
 
             let sink = AlpacaQuoteSink::dashboard(queue, Arc::clone(&feed_dropped));

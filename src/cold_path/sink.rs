@@ -2,6 +2,7 @@
 //! The TUI [`AlpacaQuoteSink::dashboard`] path enqueues **quotes and trades** so the UI can show last sale alongside NBBO.
 
 use crate::cold_path::feed_msg::FeedMsg;
+use crate::data::OhlcvBar;
 use crate::hot_path::quote_event::QuoteEvent;
 use crate::hot_path::ring::{QuoteRing, RingPushOutcome, try_push_drop_newest};
 use crossbeam_queue::ArrayQueue;
@@ -109,5 +110,10 @@ impl AlpacaQuoteSink {
             sz,
             ts_ns,
         });
+    }
+
+    #[inline]
+    pub fn on_bar(&self, symbol_id: u16, ohlcv: OhlcvBar) {
+        self.try_push_feed(FeedMsg::Bar { symbol_id, ohlcv });
     }
 }

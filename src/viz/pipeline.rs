@@ -123,6 +123,7 @@ fn apply_feed_msg(states: &mut [NbboRow], msg: FeedMsg) {
             sz,
             ..
         } => merge_trade(states, symbol_id, px_ticks, sz),
+        FeedMsg::Bar { .. } => {}
     }
 }
 

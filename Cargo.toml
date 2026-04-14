@@ -6,12 +6,25 @@ license = "GPL-3.0-or-later"
 
 [features]
 default = []
+indicators = ["dep:ta"]
+barter = [
+    "dep:barter",
+    "dep:barter-data",
+    "dep:barter-instrument",
+    "dep:rust_decimal",
+    "dep:rust_decimal_macros",
+    "dep:smol_str",
+    "indicators",
+]
 tui = ["dep:arc-swap", "dep:crossterm", "dep:ratatui"]
 tracy = ["dep:tracing-tracy"]
 
 [dependencies]
 arc-swap = { version = "1.7", optional = true }
 apca = "0.30.0"
+barter = { version = "0.12.4", optional = true }
+barter-data = { version = "0.11.0", optional = true }
+barter-instrument = { version = "0.3.1", optional = true }
 chrono = "0.4"
 crossbeam-queue = { version = "0.3", default-features = false, features = ["alloc"] }
 crossterm = { version = "0.28", optional = true }
@@ -20,8 +33,12 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 num-decimal = { version = "0.2.4", default-features = false, features = ["num-v04", "serde"] }
 parking_lot = "0.12"
 ratatui = { version = "0.30.0", optional = true }
+rust_decimal = { version = "1.36", optional = true }
+rust_decimal_macros = { version = "1.36", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+smol_str = { version = "0.3.2", optional = true }
+ta = { version = "0.5.0", optional = true }
 tokio = { version = "1.43", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -31,6 +48,11 @@ tracing-tracy = { version = "0.11", optional = true }
 name = "easy-rs-tui"
 path = "src/bin/tui.rs"
 required-features = ["tui"]
+
+[[bin]]
+name = "easy-rs-barter-smoke"
+path = "src/bin/barter_smoke.rs"
+required-features = ["barter"]
 
 [profile.release]
 opt-level = 3

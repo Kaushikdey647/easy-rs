@@ -6,10 +6,23 @@
 //!
 //! **ColdPath**: WebSocket I/O, JSON decode, tick normalization, [`AlpacaQuoteSink`] fan-out,
 //! tracing, shutdown.
+//!
+//! ## Indicators and execution (optional features)
+//!
+//! - `indicators`: TA features ( [`ta`] ) analogous to shunya `finta` columns.
+//! - `barter`: backtest / mock execution via [Barter](https://docs.rs/barter/0.12.4/barter/); live
+//!   Alpaca order placement remains [`apca`] until a dedicated execution adapter exists.
+//!
+//! **Future:** a `quant` feature may add [RustQuant](https://crates.io/crates/RustQuant) for
+//! pricing and statistics—kept off the hot streaming path.
 
 pub mod cold_path;
+pub mod data;
 pub mod hot_path;
 pub mod viz;
+
+#[cfg(feature = "indicators")]
+pub mod indicators;
 
 pub use cold_path::symbols::SymbolRegistry;
 pub use cold_path::ticks;
