@@ -4,11 +4,12 @@
 //! rolling windows; compare end-of-series values for validation vs Python.
 
 use crate::data::OhlcvBar;
+use fin_primitives::signals::float::RsiF64;
+use fin_primitives::signals::indicators::Rsi;
 use ta::DataItem;
 use ta::Next;
 use ta::indicators::{
-    AverageTrueRange, BollingerBands, MovingAverageConvergenceDivergence, RelativeStrengthIndex,
-    SimpleMovingAverage,
+    AverageTrueRange, BollingerBands, MovingAverageConvergenceDivergence, SimpleMovingAverage,
 };
 
 /// Engineered columns matching [`shunya`](https://github.com/Kaushikdey647/shunya) `finTs::_add_features_full` core set.
@@ -38,7 +39,7 @@ pub struct ShunyaFeatureRow {
 pub struct ShunyaFeatureEngine {
     sma_50: SimpleMovingAverage,
     sma_200: SimpleMovingAverage,
-    rsi_14: RelativeStrengthIndex,
+    rsi_14: RsiF64,
     macd: MovingAverageConvergenceDivergence,
     bb: BollingerBands,
     atr_14: AverageTrueRange,
@@ -57,7 +58,7 @@ impl ShunyaFeatureEngine {
         Ok(Self {
             sma_50: SimpleMovingAverage::new(50)?,
             sma_200: SimpleMovingAverage::new(200)?,
-            rsi_14: RelativeStrengthIndex::new(14)?,
+            rsi_14: Rsi::new_f64(14).expect("period 14 is valid"),
             macd: MovingAverageConvergenceDivergence::new(12, 26, 9)?,
             bb: BollingerBands::new(20, 2.0)?,
             atr_14: AverageTrueRange::new(14)?,
@@ -80,7 +81,7 @@ impl ShunyaFeatureEngine {
         let vwap = bar.vwap_proxy();
         let sma_50 = self.sma_50.next(bar.close);
         let sma_200 = self.sma_200.next(bar.close);
-        let rsi_14 = self.rsi_14.next(bar.close);
+        let rsi_14 = self.rsi_14.update(bar.close).unwrap_or(f64::NAN);
         let macd_out = self.macd.next(bar.close);
         let bb_out = self.bb.next(bar.close);
         let atr_14 = self.atr_14.next(&item);
@@ -190,6 +191,32 @@ mod tests {
         assert!(last.bb_upper.is_finite());
         assert!(last.atr_14.is_finite());
         assert!(last.log_ret.is_finite());
+    }
+
+    #[test]
+    fn rsi_14_is_wilder() {
+        // Wilder's 1978 worked example (TA-Lib RSI(14) on these closes = 70.46).
+        let closes = [
+            44.34, 44.09, 44.15, 43.61, 44.33, 44.83, 45.10, 45.42, 45.84, 46.08, 45.89, 46.03,
+            45.61, 46.28, 46.28,
+        ];
+        let t0: chrono::DateTime<chrono::Utc> = "2020-01-01T00:00:00Z".parse().unwrap();
+        let bars: Vec<OhlcvBar> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| OhlcvBar {
+                time: t0 + chrono::Duration::days(i as i64),
+                open: c,
+                high: c,
+                low: c,
+                close: c,
+                volume: 1.0,
+            })
+            .collect();
+        let rows = features_from_bars(&bars).unwrap();
+        assert!(rows[13].rsi_14.is_nan());
+        let rsi = rows[14].rsi_14;
+        assert!((rsi - 70.464).abs() < 1e-3, "rsi_14={rsi}");
     }
 
     #[test]

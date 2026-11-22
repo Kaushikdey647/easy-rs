@@ -6,7 +6,7 @@ license = "GPL-3.0-or-later"
 
 [features]
 default = []
-indicators = ["dep:ta"]
+indicators = ["dep:ta", "dep:fin-primitives"]
 barter = [
     "dep:barter",
     "dep:barter-data",
@@ -29,6 +29,7 @@ chrono = "0.4"
 crossbeam-queue = { version = "0.3", default-features = false, features = ["alloc"] }
 crossterm = { version = "0.28", optional = true }
 dotenvy = "0.15"
+fin-primitives = { version = "4.0.1", default-features = false, features = ["indicators"], optional = true }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 num-decimal = { version = "0.2.4", default-features = false, features = ["num-v04", "serde"] }
 parking_lot = "0.12"
